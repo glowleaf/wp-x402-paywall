@@ -146,6 +146,34 @@ class X402_Rules {
     }
 
     /**
+     * Check if the User-Agent matches the bot whitelist (googlebot, bingbot, etc.)
+     * Known good bots always pass through, even under auto-activated paywall.
+     */
+    public function is_bot_whitelisted_ua() {
+        $ua = $_SERVER['HTTP_USER_AGENT'] ?? '';
+        if (empty($ua)) {
+            return false;
+        }
+
+        $patterns_raw = get_option('x402_bot_whitelist_patterns', '');
+        if (empty($patterns_raw)) {
+            return false;
+        }
+
+        $parts = array_map('trim', array_filter(explode("\n", $patterns_raw)));
+        if (empty($parts)) {
+            return false;
+        }
+
+        $escaped = array_map(function ($p) {
+            return preg_quote($p, '/');
+        }, $parts);
+
+        $regex = '/(' . implode('|', $escaped) . ')/i';
+        return (bool) preg_match($regex, $ua);
+    }
+
+    /**
      * Check if visitor IP is whitelisted.
      */
     public function is_ip_whitelisted() {

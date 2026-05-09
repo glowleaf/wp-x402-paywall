@@ -65,6 +65,10 @@ register_activation_hook(__FILE__, function () {
         'x402_bot_patterns'         => "bot\ncrawler\nspider\nscraper\ncurl\nwget\npython-requests\ngo-http-client\nokhttp\naxios\nhttp-client\ngooglebot\nbingbot\nslurp\nduckduckbot\nbaiduspider\nyandexbot\nfacebookexternalhit\ntwitterbot\napplebot\nanthropic\nclaude\ngpt\nchatgpt-openai\nopenai\nperplexity\nai2\nsemanticscholar\ncohere",
         'x402_excluded_paths'       => "/llms.txt\n/wp-json/x402/\n/wp-admin/\n/wp-login.php\n/robots.txt\n/sitemap.xml\n/sitemap_index.xml\n/feed/\n/comments/feed/",
         'x402_ip_whitelist'         => '',
+        'x402_auto_threshold'       => 1000,
+        'x402_auto_deactivate_threshold' => 500,
+        'x402_auto_window'          => 60,
+        'x402_bot_whitelist_patterns' => "googlebot\nbingbot\nslurp\nduckduckbot\nbaiduspider\nyandexbot\napplebot",
     ];
     foreach ($defaults as $key => $value) {
         if (get_option($key) === false) {
@@ -102,4 +106,17 @@ add_action('plugins_loaded', function () {
     require X402_PAYWALL_PATH . 'includes/class-x402-handler.php';
 
     new X402_Paywall\X402_Handler();
+});
+
+/**
+ * Admin bar toggle: URL-based panic button to flip paywall on/off.
+ */
+add_action('admin_init', function () {
+    if (isset($_GET['x402_toggle']) && current_user_can('manage_options')) {
+        check_admin_referer('x402_toggle');
+        $current = get_option('x402_enabled', 'no');
+        update_option('x402_enabled', $current === 'yes' ? 'no' : 'yes');
+        wp_safe_redirect(remove_query_arg(['x402_toggle', '_wpnonce']));
+        exit;
+    }
 });

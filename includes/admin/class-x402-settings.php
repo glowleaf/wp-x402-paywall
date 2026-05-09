@@ -10,6 +10,7 @@ defined('ABSPATH') || exit;
  *   General      — enable/disable, mode, fail-open, contact email
  *   Pricing      — price, network, wallet, facilitator URL
  *   Rules        — session TTL, bot patterns, excluded paths, paywalled paths, IP whitelist
+ *   Auto Mode    — rate-based auto-activation, thresholds, bot whitelist
  *
  * Also shows a status panel at the bottom.
  */
@@ -222,6 +223,60 @@ class X402_Settings {
             $this->option_group,
             'x402_section_rules'
         );
+
+        // --- Section 4: Auto Mode (Rate-Based) ---
+        add_settings_section(
+            'x402_section_auto',
+            __('Auto Mode (Rate-Based)', 'x402-paywall'),
+            [$this, 'section_auto_cb'],
+            $this->option_group
+        );
+
+        register_setting($this->option_group, 'x402_auto_threshold', [
+            'type' => 'integer',
+            'sanitize_callback' => 'absint',
+        ]);
+        register_setting($this->option_group, 'x402_auto_deactivate_threshold', [
+            'type' => 'integer',
+            'sanitize_callback' => 'absint',
+        ]);
+        register_setting($this->option_group, 'x402_auto_window', [
+            'type' => 'integer',
+            'sanitize_callback' => 'absint',
+        ]);
+        register_setting($this->option_group, 'x402_bot_whitelist_patterns', [
+            'type' => 'string',
+            'sanitize_callback' => [$this, 'sanitize_textarea'],
+        ]);
+
+        add_settings_field(
+            'x402_auto_threshold',
+            __('Trigger Threshold', 'x402-paywall'),
+            [$this, 'field_auto_threshold'],
+            $this->option_group,
+            'x402_section_auto'
+        );
+        add_settings_field(
+            'x402_auto_deactivate_threshold',
+            __('Deactivation Threshold', 'x402-paywall'),
+            [$this, 'field_auto_deactivate_threshold'],
+            $this->option_group,
+            'x402_section_auto'
+        );
+        add_settings_field(
+            'x402_auto_window',
+            __('Rate Window (seconds)', 'x402-paywall'),
+            [$this, 'field_auto_window'],
+            $this->option_group,
+            'x402_section_auto'
+        );
+        add_settings_field(
+            'x402_bot_whitelist_patterns',
+            __('Bot Whitelist (always pass)', 'x402-paywall'),
+            [$this, 'field_bot_whitelist_patterns'],
+            $this->option_group,
+            'x402_section_auto'
+        );
     }
 
     // --- Sanitizers ---
@@ -231,7 +286,7 @@ class X402_Settings {
     }
 
     public function sanitize_mode($value) {
-        return in_array($value, ['bots', 'all', 'paths'], true) ? $value : 'bots';
+        return in_array($value, ['bots', 'all', 'paths', 'auto'], true) ? $value : 'bots';
     }
 
     public function sanitize_price($value) {
@@ -285,6 +340,13 @@ class X402_Settings {
         ) . '</p>';
     }
 
+    public function section_auto_cb() {
+        echo '<p>' . esc_html__(
+            'Auto mode acts as an anti-DDoS panic switch. The plugin monitors request rate in a sliding window. When traffic exceeds the trigger threshold, the paywall activates automatically. Known good bots (Google, Bing) pass through. When traffic drops below the deactivation threshold, the paywall turns back off.',
+            'x402-paywall'
+        ) . '</p>';
+    }
+
     // --- Field renderers ---
 
     public function field_enabled() {
@@ -303,8 +365,9 @@ class X402_Settings {
             <option value="bots" <?php selected($value, 'bots'); ?>><?php esc_html_e('Bots only (default)', 'x402-paywall'); ?></option>
             <option value="all" <?php selected($value, 'all'); ?>><?php esc_html_e('All traffic', 'x402-paywall'); ?></option>
             <option value="paths" <?php selected($value, 'paths'); ?>><?php esc_html_e('Specific paths only', 'x402-paywall'); ?></option>
+            <option value="auto" <?php selected($value, 'auto'); ?>><?php esc_html_e('Auto — rate-based panic mode', 'x402-paywall'); ?></option>
         </select>
-        <p class="description"><?php esc_html_e('"Bots only" paywalls known crawlers/AI agents. "All" paywalls every non-excluded request. "Paths" paywalls only specific URL prefixes.', 'x402-paywall'); ?></p>
+        <p class="description"><?php esc_html_e('"Bots only" paywalls known crawlers/AI agents. "All" paywalls every non-excluded request. "Paths" paywalls only specific URL prefixes. "Auto" activates the paywall when traffic exceeds a threshold (anti-DDoS panic mode).', 'x402-paywall'); ?></p>
         <?php
     }
 
@@ -412,6 +475,38 @@ class X402_Settings {
         <?php
     }
 
+    public function field_auto_threshold() {
+        $value = get_option('x402_auto_threshold', 1000);
+        ?>
+        <input type="number" name="x402_auto_threshold" value="<?php echo esc_attr($value); ?>" class="small-text" min="1" step="1">
+        <p class="description"><?php esc_html_e('Requests per window that trigger paywall activation. Default: 1000.', 'x402-paywall'); ?></p>
+        <?php
+    }
+
+    public function field_auto_deactivate_threshold() {
+        $value = get_option('x402_auto_deactivate_threshold', 500);
+        ?>
+        <input type="number" name="x402_auto_deactivate_threshold" value="<?php echo esc_attr($value); ?>" class="small-text" min="1" step="1">
+        <p class="description"><?php esc_html_e('When rate drops below this, deactivate the paywall. Should be lower than trigger. Default: 500.', 'x402-paywall'); ?></p>
+        <?php
+    }
+
+    public function field_auto_window() {
+        $value = get_option('x402_auto_window', 60);
+        ?>
+        <input type="number" name="x402_auto_window" value="<?php echo esc_attr($value); ?>" class="small-text" min="10" max="3600" step="1">
+        <p class="description"><?php esc_html_e('Sliding window size in seconds. Default: 60 (1 minute). Minimum: 10.', 'x402-paywall'); ?></p>
+        <?php
+    }
+
+    public function field_bot_whitelist_patterns() {
+        $value = get_option('x402_bot_whitelist_patterns', '');
+        ?>
+        <textarea name="x402_bot_whitelist_patterns" rows="4" class="large-text code"><?php echo esc_textarea($value); ?></textarea>
+        <p class="description"><?php esc_html_e('User-Agent patterns that always pass through, even when auto-activated. One per line. Default covers major search engines.', 'x402-paywall'); ?></p>
+        <?php
+    }
+
     // --- Page renderer ---
 
     public function render_page() {
@@ -452,16 +547,32 @@ class X402_Settings {
         $wallet   = get_option('x402_wallet', '');
         $network  = get_option('x402_network', 'eip155:8453');
         $facilitator = untrailingslashit(get_option('x402_facilitator_url', 'https://x402.org/facilitator'));
+        $auto_active = get_option('x402_auto_activated', 'no');
 
         ?>
         <table class="widefat striped" style="max-width:600px">
             <tr>
                 <td><strong><?php esc_html_e('Status', 'x402-paywall'); ?></strong></td>
-                <td><?php echo ($enabled === 'yes') ? '🟢 ' . esc_html__('Enabled', 'x402-paywall') : '🔴 ' . esc_html__('Disabled', 'x402-paywall'); ?></td>
+                <td><?php
+                    if ($mode === 'auto' && $auto_active === 'yes') {
+                        echo '⚠️ ' . esc_html__('Auto-Active', 'x402-paywall');
+                    } elseif ($enabled === 'yes') {
+                        echo '🟢 ' . esc_html__('Enabled', 'x402-paywall');
+                    } else {
+                        echo '🔴 ' . esc_html__('Disabled', 'x402-paywall');
+                    }
+                ?></td>
             </tr>
             <tr>
                 <td><strong><?php esc_html_e('Mode', 'x402-paywall'); ?></strong></td>
-                <td><?php echo esc_html(ucfirst($mode)); ?></td>
+                <td><?php
+                    echo esc_html(ucfirst($mode));
+                    if ($mode === 'auto' && $auto_active === 'yes') {
+                        echo ' <span style="color:#f59e0b">(⚠️ active — ' . esc_html(get_option('x402_auto_threshold', 1000)) . ' req/window threshold)</span>';
+                    } elseif ($mode === 'auto') {
+                        echo ' <span style="color:#22c55e">(🟢 monitoring)</span>';
+                    }
+                ?></td>
             </tr>
             <tr>
                 <td><strong><?php esc_html_e('Wallet', 'x402-paywall'); ?></strong></td>

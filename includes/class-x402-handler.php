@@ -7,10 +7,12 @@ defined('ABSPATH') || exit;
  * Core handler: intercepts requests and orchestrates the paywall flow.
  *
  * Hooks into parse_request (fires before any output) to:
- * 1. Check if enabled and rules match
- * 2. Check for existing paid session (cookie)
- * 3. Check for PAYMENT-SIGNATURE header (retry after payment)
- * 4. If no valid payment → send 402 with PAYMENT-REQUIRED
+ * 1. Track request rate (for auto mode)
+ * 2. Check auto activation/deactivation
+ * 3. Check if enabled and rules match
+ * 4. Check for existing paid session (cookie)
+ * 5. Check for PAYMENT-SIGNATURE header (retry after payment)
+ * 6. If no valid payment → send 402 with PAYMENT-REQUIRED
  */
 class X402_Handler {
 
@@ -31,31 +33,51 @@ class X402_Handler {
 
         // parse_request fires early, before any output or template_redirect
         add_action('parse_request', [$this, 'intercept'], 0);
+
+        // Admin bar panic button (front-end + admin)
+        add_action('admin_bar_menu', [$this, 'admin_bar_button'], 100);
     }
 
     /**
      * Main interception point.
-     *
-     * @param \WP $wp Current WordPress environment instance.
      */
     public function intercept($wp) {
-        // 1. Is paywall enabled?
-        if (get_option('x402_enabled', 'no') !== 'yes') {
+        // Track request rate on every hit (for auto mode monitoring)
+        $this->track_rate();
+
+        $mode = get_option('x402_mode', 'bots');
+
+        // Auto mode: check if rate exceeds threshold and auto-activate
+        if ($mode === 'auto') {
+            $this->check_auto_activation();
+        }
+
+        // Is the paywall active? (manually enabled OR auto-activated)
+        $enabled     = get_option('x402_enabled', 'no');
+        $auto_active = get_option('x402_auto_activated', 'no');
+        $is_active   = ($enabled === 'yes') || ($mode === 'auto' && $auto_active === 'yes');
+
+        if (!$is_active) {
             return;
         }
 
-        // 2. Should this request be paywalled?
+        // Bot whitelist: known good bots (googlebot, bingbot) pass through
+        if ($this->rules->is_bot_whitelisted_ua()) {
+            return;
+        }
+
+        // Should this request be paywalled?
         if (!$this->rules->should_paywall($wp)) {
             return;
         }
 
-        // 3. Does the visitor already have a valid paid session?
+        // Does the visitor already have a valid paid session?
         $session_token = $this->get_session_token();
         if ($session_token && $this->session->is_valid($session_token)) {
             return;
         }
 
-        // 4. Does the visitor include a PAYMENT-SIGNATURE? (retry after paying)
+        // Does the visitor include a PAYMENT-SIGNATURE? (retry after paying)
         $payment_signature = $this->get_payment_signature_header();
         if (!empty($payment_signature)) {
             $payment_required = $this->get_payment_required_cookie();
@@ -86,7 +108,7 @@ class X402_Handler {
             }
         }
 
-        // 5. No valid payment → send 402
+        // No valid payment → send 402
         $payload = $this->payment_required->build();
 
         // If wallet is not configured, we can't charge — let the request through
@@ -102,31 +124,99 @@ class X402_Handler {
     }
 
     /**
-     * Get PAYMENT-SIGNATURE from request headers.
+     * Track request rate using a sliding window.
+     * Always runs, even when paywall is off, so auto mode can detect spikes.
      */
+    private function track_rate() {
+        $window = max(10, (int) get_option('x402_auto_window', 60));
+        $slot   = (int) (time() / $window);
+        $key    = 'x402_rate_' . $slot;
+
+        $count = (int) get_transient($key);
+        $count++;
+        set_transient($key, $count, $window * 2);
+    }
+
+    /**
+     * Check if auto mode should activate or deactivate based on rate.
+     */
+    private function check_auto_activation() {
+        $window              = max(10, (int) get_option('x402_auto_window', 60));
+        $threshold           = (int) get_option('x402_auto_threshold', 1000);
+        $deactivate_threshold = (int) get_option('x402_auto_deactivate_threshold', 500);
+
+        // Current time-slot count
+        $slot          = (int) (time() / $window);
+        $current_count = (int) get_transient('x402_rate_' . $slot);
+
+        // Previous slot (to handle window boundary edge)
+        $prev_count = (int) get_transient('x402_rate_' . ($slot - 1));
+
+        // Use the higher of the two (smoothed rate)
+        $rate = max($current_count, $prev_count);
+
+        $auto_active = get_option('x402_auto_activated', 'no');
+
+        if ($rate >= $threshold && $auto_active !== 'yes') {
+            update_option('x402_auto_activated', 'yes');
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log("[x402-paywall] Auto-activated: {$rate} req/slot >= {$threshold}");
+            }
+        } elseif ($rate <= $deactivate_threshold && $auto_active === 'yes') {
+            update_option('x402_auto_activated', 'no');
+            if (defined('WP_DEBUG') && WP_DEBUG) {
+                error_log("[x402-paywall] Auto-deactivated: {$rate} req/slot <= {$deactivate_threshold}");
+            }
+        }
+    }
+
+    /**
+     * Admin bar panic button — shows current status, toggles manually.
+     */
+    public function admin_bar_button($wp_admin_bar) {
+        if (!current_user_can('manage_options')) {
+            return;
+        }
+
+        $enabled     = get_option('x402_enabled', 'no');
+        $mode        = get_option('x402_mode', 'bots');
+        $auto_active = get_option('x402_auto_activated', 'no');
+
+        if ($mode === 'auto' && $auto_active === 'yes') {
+            $label = '⚠️ Paywall (AUTO)';
+            $color = '#f59e0b';
+        } elseif ($enabled === 'yes') {
+            $label = '🔴 Paywall ON';
+            $color = '#ef4444';
+        } else {
+            $label = '🟢 Paywall OFF';
+            $color = '#22c55e';
+        }
+
+        $wp_admin_bar->add_node([
+            'id'     => 'x402-paywall-status',
+            'title'  => '<span style="color:' . $color . ';font-weight:600;">' . $label . '</span>',
+            'href'   => wp_nonce_url(admin_url('options-general.php?page=x402-paywall&x402_toggle=1'), 'x402_toggle'),
+            'meta'   => ['title' => 'Click to toggle x402 paywall'],
+        ]);
+    }
+
+    // --- Header/cookie helpers ---
+
     private function get_payment_signature_header() {
         return $_SERVER['HTTP_PAYMENT_SIGNATURE']
             ?? $_SERVER['REDIRECT_HTTP_PAYMENT_SIGNATURE']
             ?? '';
     }
 
-    /**
-     * Get the PAYMENT-REQUIRED cookie set during the initial 402 response.
-     */
     private function get_payment_required_cookie() {
         return $_COOKIE['x402_payment_required'] ?? '';
     }
 
-    /**
-     * Get the session token from cookie.
-     */
     private function get_session_token() {
         return $_COOKIE['x402_session'] ?? '';
     }
 
-    /**
-     * Set the session cookie.
-     */
     private function set_session_cookie($token) {
         $ttl = (int) get_option('x402_session_ttl', 24);
         setcookie(
